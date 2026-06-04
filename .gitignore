@@ -1,0 +1,7 @@
+# 素材/参考图，不部署
+*_tupian/
+# 本地工具配置
+.claude/
+# 依赖与构建产物
+node_modules/
+dist/

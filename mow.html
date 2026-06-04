@@ -1,0 +1,484 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>割草进化</title>
+  <style>
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+    body {
+      background: #0a0a18;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+      min-height: 100vh;
+      font-family: "Microsoft YaHei", "PingFang SC", sans-serif;
+      color: #fff;
+      user-select: none;
+    }
+    #wrapper {
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      gap: 12px;
+    }
+    canvas {
+      border: 2px solid #4f46e5;
+      border-radius: 10px;
+      box-shadow: 0 0 40px rgba(79,70,229,0.4);
+      display: block;
+    }
+    #back-btn {
+      color: #6b7280;
+      font-size: 0.85rem;
+      text-decoration: none;
+      letter-spacing: 1px;
+      transition: color 0.2s;
+    }
+    #back-btn:hover { color: #a78bfa; }
+    #hint {
+      color: #374151;
+      font-size: 0.8rem;
+      letter-spacing: 1px;
+    }
+  </style>
+</head>
+<body>
+<div id="wrapper">
+  <canvas id="game" width="800" height="580"></canvas>
+  <span id="hint">WASD / 方向键 移动 · 自动攻击 · 升级时按 1/2/3 选择强化</span>
+  <a href="index.html" id="back-btn">← 返回主页</a>
+</div>
+
+<script>
+const canvas = document.getElementById('game');
+const ctx = canvas.getContext('2d');
+const W = canvas.width;
+const H = canvas.height;
+
+// ── 游戏状态 ──────────────────────────────────────────
+const state = {
+  floor: 1,
+  enemiesKilled: 0,
+  enemiesPerFloor: 25,
+  gameOver: false,
+  levelUp: false,
+};
+
+// ── 玩家 ──────────────────────────────────────────────
+const player = {
+  x: W / 2, y: H / 2, r: 16,
+  speed: 180,
+  hp: 100, maxHp: 100,
+  exp: 0, expMax: 80,
+  level: 1,
+  damage: 22,
+  attackSpeed: 1.2,
+  attackRange: 280,
+  attackTimer: 0,
+  bulletSpeed: 420,
+  pierce: 1,
+  multiShot: 1,
+};
+
+// ── 输入 ──────────────────────────────────────────────
+const keys = {};
+window.addEventListener('keydown', e => { keys[e.key] = true; e.preventDefault && ['ArrowUp','ArrowDown','ArrowLeft','ArrowRight',' '].includes(e.key) && e.preventDefault(); });
+window.addEventListener('keyup',  e => { keys[e.key] = false; });
+
+// ── 数组 ──────────────────────────────────────────────
+let enemies = [], bullets = [], expOrbs = [], floatTexts = [];
+let spawnTimer = 0, spawnInterval = 1.8;
+
+// ── 升级选项 ──────────────────────────────────────────
+const upgradePool = [
+  { name: '⚔️ 攻击力 +60%',   apply: () => player.damage *= 1.6 },
+  { name: '⚡ 攻速 +35%',     apply: () => player.attackSpeed *= 1.35 },
+  { name: '💨 移速 +25%',     apply: () => player.speed *= 1.25 },
+  { name: '❤️ 生命 +80',      apply: () => { player.maxHp += 80; player.hp = Math.min(player.hp + 80, player.maxHp); } },
+  { name: '🔱 穿透 +1',       apply: () => player.pierce++ },
+  { name: '🌀 多重射击 +1',   apply: () => player.multiShot++ },
+  { name: '📡 射程 +80',      apply: () => player.attackRange += 80 },
+  { name: '💊 立即回血 50',   apply: () => player.hp = Math.min(player.hp + 50, player.maxHp) },
+  { name: '💥 子弹变大',      apply: () => { player.damage *= 1.3; player.pierce++; } },
+];
+let currentUpgrades = [];
+
+function pickUpgrades() {
+  const pool = [...upgradePool].sort(() => Math.random() - 0.5);
+  currentUpgrades = pool.slice(0, 3);
+}
+
+// ── 敌人数值（随楼层缩放）────────────────────────────
+function enemyStats() {
+  const f = state.floor;
+  return {
+    hp: Math.floor(35 * Math.pow(1.35, f - 1)),
+    speed: 55 + f * 6,
+    damage: 6 + f * 2.5,
+    exp: 12 + f * 3,
+    r: 13 + Math.min(f, 5),
+  };
+}
+
+function spawnEnemy() {
+  const s = enemyStats();
+  const side = Math.floor(Math.random() * 4);
+  let x, y;
+  if      (side === 0) { x = Math.random() * W; y = -24; }
+  else if (side === 1) { x = W + 24;            y = Math.random() * H; }
+  else if (side === 2) { x = Math.random() * W; y = H + 24; }
+  else                 { x = -24;               y = Math.random() * H; }
+  enemies.push({ x, y, hp: s.hp, maxHp: s.hp, speed: s.speed, damage: s.damage, exp: s.exp, r: s.r, hit: 0 });
+}
+
+// ── 射击 ──────────────────────────────────────────────
+function shoot(target) {
+  const spread = 0.18;
+  for (let i = 0; i < player.multiShot; i++) {
+    const angle = Math.atan2(target.y - player.y, target.x - player.x)
+                + (i - (player.multiShot - 1) / 2) * spread;
+    bullets.push({
+      x: player.x, y: player.y,
+      vx: Math.cos(angle) * player.bulletSpeed,
+      vy: Math.sin(angle) * player.bulletSpeed,
+      damage: player.damage,
+      pierceLeft: player.pierce,
+      r: 5 + player.multiShot,
+    });
+  }
+}
+
+function nearestEnemy() {
+  let best = null, minD = player.attackRange;
+  for (const e of enemies) {
+    const d = Math.hypot(e.x - player.x, e.y - player.y);
+    if (d < minD) { minD = d; best = e; }
+  }
+  return best;
+}
+
+// ── 更新 ──────────────────────────────────────────────
+let lastTime = 0;
+
+function update(dt) {
+  if (state.gameOver || state.levelUp) return;
+
+  // 移动
+  let dx = 0, dy = 0;
+  if (keys['ArrowLeft']  || keys['a'] || keys['A']) dx -= 1;
+  if (keys['ArrowRight'] || keys['d'] || keys['D']) dx += 1;
+  if (keys['ArrowUp']    || keys['w'] || keys['W']) dy -= 1;
+  if (keys['ArrowDown']  || keys['s'] || keys['S']) dy += 1;
+  if (dx || dy) {
+    const len = Math.hypot(dx, dy);
+    player.x = Math.max(player.r, Math.min(W - player.r, player.x + (dx/len) * player.speed * dt));
+    player.y = Math.max(player.r, Math.min(H - player.r, player.y + (dy/len) * player.speed * dt));
+  }
+
+  // 攻击
+  player.attackTimer += dt;
+  if (player.attackTimer >= 1 / player.attackSpeed) {
+    player.attackTimer = 0;
+    const t = nearestEnemy();
+    if (t) shoot(t);
+  }
+
+  // 生成敌人
+  spawnTimer += dt;
+  if (spawnTimer >= spawnInterval && enemies.length < 40 + state.floor * 3) {
+    spawnTimer = 0;
+    spawnInterval = Math.max(0.4, 1.8 - state.floor * 0.08);
+    spawnEnemy();
+  }
+
+  // 子弹
+  for (let i = bullets.length - 1; i >= 0; i--) {
+    const b = bullets[i];
+    b.x += b.vx * dt;
+    b.y += b.vy * dt;
+    if (b.x < -60 || b.x > W + 60 || b.y < -60 || b.y > H + 60) {
+      bullets.splice(i, 1); continue;
+    }
+    for (let j = enemies.length - 1; j >= 0; j--) {
+      const e = enemies[j];
+      if (Math.hypot(b.x - e.x, b.y - e.y) < b.r + e.r) {
+        e.hp -= b.damage;
+        e.hit = 0.12;
+        floatTexts.push({ x: e.x, y: e.y - e.r - 4, text: Math.floor(b.damage) + '', color: '#fbbf24', life: 0.8, vy: -45 });
+        b.pierceLeft--;
+        if (e.hp <= 0) {
+          expOrbs.push({ x: e.x, y: e.y, v: e.exp, r: 5 });
+          state.enemiesKilled++;
+          enemies.splice(j, 1);
+        }
+        if (b.pierceLeft <= 0) { bullets.splice(i, 1); break; }
+      }
+    }
+  }
+
+  // 敌人移动 & 伤害
+  for (const e of enemies) {
+    const dx2 = player.x - e.x, dy2 = player.y - e.y;
+    const d = Math.hypot(dx2, dy2);
+    e.x += (dx2 / d) * e.speed * dt;
+    e.y += (dy2 / d) * e.speed * dt;
+    if (e.hit > 0) e.hit -= dt;
+    if (d < e.r + player.r) {
+      player.hp -= e.damage * dt;
+      if (player.hp <= 0) { player.hp = 0; state.gameOver = true; }
+    }
+  }
+
+  // 经验球
+  for (let i = expOrbs.length - 1; i >= 0; i--) {
+    const o = expOrbs[i];
+    const dx2 = player.x - o.x, dy2 = player.y - o.y;
+    const d = Math.hypot(dx2, dy2);
+    if (d < 90) { o.x += (dx2/d)*220*dt; o.y += (dy2/d)*220*dt; }
+    if (d < player.r + o.r) {
+      player.exp += o.v;
+      expOrbs.splice(i, 1);
+      if (player.exp >= player.expMax) {
+        player.exp -= player.expMax;
+        player.level++;
+        player.expMax = Math.floor(player.expMax * 1.45);
+        state.levelUp = true;
+        pickUpgrades();
+      }
+    }
+  }
+
+  // 浮动文字
+  for (let i = floatTexts.length - 1; i >= 0; i--) {
+    const t = floatTexts[i];
+    t.y += t.vy * dt;
+    t.life -= dt;
+    if (t.life <= 0) floatTexts.splice(i, 1);
+  }
+
+  // 楼层推进
+  if (state.enemiesKilled >= state.floor * state.enemiesPerFloor) {
+    state.floor++;
+    state.enemiesKilled = 0;
+    player.hp = Math.min(player.hp + 25, player.maxHp);
+    floatTexts.push({ x: W/2, y: H/2 - 20, text: `✦ 第 ${state.floor} 层 ✦`, color: '#34d399', life: 2.2, vy: -18 });
+  }
+}
+
+// ── 绘制工具 ──────────────────────────────────────────
+function rr(x, y, w, h, r) {
+  ctx.beginPath();
+  ctx.moveTo(x+r, y);
+  ctx.lineTo(x+w-r, y);
+  ctx.arcTo(x+w, y, x+w, y+r, r);
+  ctx.lineTo(x+w, y+h-r);
+  ctx.arcTo(x+w, y+h, x+w-r, y+h, r);
+  ctx.lineTo(x+r, y+h);
+  ctx.arcTo(x, y+h, x, y+h-r, r);
+  ctx.lineTo(x, y+r);
+  ctx.arcTo(x, y, x+r, y, r);
+  ctx.closePath();
+}
+
+// ── 绘制 ──────────────────────────────────────────────
+function draw() {
+  // 背景
+  ctx.fillStyle = '#0f0f23';
+  ctx.fillRect(0, 0, W, H);
+
+  // 网格
+  ctx.strokeStyle = '#16163a';
+  ctx.lineWidth = 1;
+  for (let x = 0; x < W; x += 44) { ctx.beginPath(); ctx.moveTo(x,0); ctx.lineTo(x,H); ctx.stroke(); }
+  for (let y = 0; y < H; y += 44) { ctx.beginPath(); ctx.moveTo(0,y); ctx.lineTo(W,y); ctx.stroke(); }
+
+  // 经验球
+  for (const o of expOrbs) {
+    ctx.beginPath(); ctx.arc(o.x, o.y, o.r, 0, Math.PI*2);
+    ctx.fillStyle = '#34d399'; ctx.fill();
+    ctx.strokeStyle = '#6ee7b7'; ctx.lineWidth = 1; ctx.stroke();
+  }
+
+  // 敌人
+  for (const e of enemies) {
+    ctx.beginPath(); ctx.arc(e.x, e.y, e.r, 0, Math.PI*2);
+    ctx.fillStyle = e.hit > 0 ? '#fff' : '#f87171';
+    ctx.fill();
+    ctx.strokeStyle = '#dc2626'; ctx.lineWidth = 2; ctx.stroke();
+    // 血条
+    const bw = e.r * 2.2;
+    ctx.fillStyle = '#1f2937'; ctx.fillRect(e.x - bw/2, e.y - e.r - 9, bw, 4);
+    ctx.fillStyle = '#ef4444'; ctx.fillRect(e.x - bw/2, e.y - e.r - 9, bw * Math.max(0, e.hp/e.maxHp), 4);
+  }
+
+  // 子弹
+  for (const b of bullets) {
+    ctx.beginPath(); ctx.arc(b.x, b.y, b.r, 0, Math.PI*2);
+    const g = ctx.createRadialGradient(b.x, b.y, 0, b.x, b.y, b.r);
+    g.addColorStop(0, '#fff9c4'); g.addColorStop(1, '#f59e0b');
+    ctx.fillStyle = g; ctx.fill();
+  }
+
+  // 玩家
+  ctx.beginPath(); ctx.arc(player.x, player.y, player.r, 0, Math.PI*2);
+  const pg = ctx.createRadialGradient(player.x-4, player.y-4, 2, player.x, player.y, player.r);
+  pg.addColorStop(0, '#c4b5fd'); pg.addColorStop(1, '#4f46e5');
+  ctx.fillStyle = pg; ctx.fill();
+  ctx.strokeStyle = '#a78bfa'; ctx.lineWidth = 2.5; ctx.stroke();
+
+  // 攻击范围虚线（淡）
+  ctx.beginPath(); ctx.arc(player.x, player.y, player.attackRange, 0, Math.PI*2);
+  ctx.strokeStyle = 'rgba(167,139,250,0.08)'; ctx.lineWidth = 1;
+  ctx.setLineDash([6,6]); ctx.stroke(); ctx.setLineDash([]);
+
+  // 浮动文字
+  for (const t of floatTexts) {
+    const alpha = Math.min(1, t.life * 2.5);
+    ctx.globalAlpha = alpha;
+    ctx.fillStyle = t.color;
+    ctx.font = `bold ${t.text.length > 6 ? 20 : 15}px "Microsoft YaHei"`;
+    ctx.textAlign = 'center';
+    ctx.fillText(t.text, t.x, t.y);
+  }
+  ctx.globalAlpha = 1;
+
+  drawHUD();
+  if (state.levelUp) drawLevelUp();
+  if (state.gameOver) drawGameOver();
+}
+
+function drawHUD() {
+  const pad = 14;
+
+  // HP 条
+  const hpW = 210;
+  ctx.fillStyle = '#1f2937'; rr(pad, pad, hpW, 18, 9); ctx.fill();
+  const hpFrac = Math.max(0, player.hp / player.maxHp);
+  const hpColor = hpFrac > 0.5 ? '#22c55e' : hpFrac > 0.25 ? '#f59e0b' : '#ef4444';
+  ctx.fillStyle = hpColor; rr(pad, pad, hpW * hpFrac, 18, 9); ctx.fill();
+  ctx.fillStyle = '#fff'; ctx.font = 'bold 11px "Microsoft YaHei"'; ctx.textAlign = 'left';
+  ctx.fillText(`♥ ${Math.ceil(player.hp)} / ${player.maxHp}`, pad + 6, pad + 13);
+
+  // EXP 条
+  ctx.fillStyle = '#1f2937'; rr(pad, pad + 22, hpW, 10, 5); ctx.fill();
+  ctx.fillStyle = '#34d399'; rr(pad, pad + 22, hpW * (player.exp / player.expMax), 10, 5); ctx.fill();
+  ctx.fillStyle = '#6ee7b7'; ctx.font = '10px "Microsoft YaHei"'; ctx.textAlign = 'left';
+  ctx.fillText(`Lv.${player.level}  ${player.exp}/${player.expMax}`, pad + 4, pad + 31);
+
+  // 中间：楼层
+  ctx.textAlign = 'center';
+  ctx.fillStyle = '#e2e8f0'; ctx.font = 'bold 22px "Microsoft YaHei"';
+  ctx.fillText(`第 ${state.floor} 层`, W/2, pad + 22);
+  const need = state.floor * state.enemiesPerFloor;
+  const prog = Math.min(state.enemiesKilled, need);
+  ctx.fillStyle = '#64748b'; ctx.font = '12px "Microsoft YaHei"';
+  ctx.fillText(`击杀 ${prog} / ${need}`, W/2, pad + 40);
+  // 进度条
+  const pw = 160, ph = 5;
+  ctx.fillStyle = '#1f2937'; rr(W/2 - pw/2, pad + 44, pw, ph, 3); ctx.fill();
+  ctx.fillStyle = '#a78bfa'; rr(W/2 - pw/2, pad + 44, pw * (prog/need), ph, 3); ctx.fill();
+
+  // 右侧属性
+  ctx.textAlign = 'right';
+  ctx.fillStyle = '#fbbf24'; ctx.font = '12px "Microsoft YaHei"'; ctx.fillText(`⚔ ${Math.floor(player.damage)}`, W - pad, pad + 14);
+  ctx.fillStyle = '#60a5fa'; ctx.fillText(`⚡ ${player.attackSpeed.toFixed(1)}/s`, W - pad, pad + 30);
+  ctx.fillStyle = '#f472b6'; ctx.fillText(`✦ 穿${player.pierce} 多${player.multiShot}`, W - pad, pad + 46);
+}
+
+function drawLevelUp() {
+  ctx.fillStyle = 'rgba(5,5,20,0.82)';
+  ctx.fillRect(0, 0, W, H);
+
+  ctx.textAlign = 'center';
+  ctx.fillStyle = '#a78bfa'; ctx.font = 'bold 30px "Microsoft YaHei"';
+  ctx.fillText(`🎉 Lv.${player.level}  选择强化`, W/2, H/2 - 110);
+
+  const cw = 200, ch = 130, gap = 22;
+  const sx = (W - (cw*3 + gap*2)) / 2;
+  const sy = H/2 - 80;
+
+  currentUpgrades.forEach((u, i) => {
+    const cx = sx + i*(cw+gap), cy = sy;
+    rr(cx, cy, cw, ch, 14); ctx.fillStyle = '#1a1640'; ctx.fill();
+    ctx.strokeStyle = '#7c3aed'; ctx.lineWidth = 2; ctx.stroke();
+
+    ctx.fillStyle = '#e2e8f0'; ctx.font = 'bold 14px "Microsoft YaHei"'; ctx.textAlign = 'center';
+    ctx.fillText(u.name, cx+cw/2, cy+40);
+
+    // 选择键
+    rr(cx+30, cy+ch-42, cw-60, 30, 8); ctx.fillStyle = '#5b21b6'; ctx.fill();
+    ctx.fillStyle = '#fff'; ctx.font = 'bold 14px "Microsoft YaHei"';
+    ctx.fillText(`按 ${i+1}`, cx+cw/2, cy+ch-22);
+  });
+
+  ctx.fillStyle = '#4b5563'; ctx.font = '12px "Microsoft YaHei"'; ctx.textAlign = 'center';
+  ctx.fillText('按 1 / 2 / 3 键  或  点击卡片', W/2, H/2 + 75);
+}
+
+function drawGameOver() {
+  ctx.fillStyle = 'rgba(0,0,0,0.85)';
+  ctx.fillRect(0, 0, W, H);
+  ctx.textAlign = 'center';
+  ctx.fillStyle = '#ef4444'; ctx.font = 'bold 50px "Microsoft YaHei"';
+  ctx.fillText('游戏结束', W/2, H/2 - 70);
+  ctx.fillStyle = '#cbd5e1'; ctx.font = '22px "Microsoft YaHei"';
+  ctx.fillText(`到达第 ${state.floor} 层`, W/2, H/2 - 20);
+  ctx.fillText(`角色等级 Lv.${player.level}`, W/2, H/2 + 15);
+
+  rr(W/2 - 90, H/2 + 50, 180, 46, 12); ctx.fillStyle = '#4f46e5'; ctx.fill();
+  ctx.fillStyle = '#fff'; ctx.font = 'bold 18px "Microsoft YaHei"';
+  ctx.fillText('再来一局', W/2, H/2 + 79);
+
+  ctx.fillStyle = '#374151'; ctx.font = '13px "Microsoft YaHei"';
+  ctx.fillText('按 Enter 或点击按钮', W/2, H/2 + 115);
+}
+
+// ── 键盘事件 ──────────────────────────────────────────
+window.addEventListener('keydown', e => {
+  if (state.levelUp) {
+    const idx = ['1','2','3'].indexOf(e.key);
+    if (idx !== -1 && currentUpgrades[idx]) { currentUpgrades[idx].apply(); state.levelUp = false; }
+  }
+  if (state.gameOver && e.key === 'Enter') location.reload();
+});
+
+// ── 鼠标点击 ──────────────────────────────────────────
+canvas.addEventListener('click', e => {
+  const rect = canvas.getBoundingClientRect();
+  const mx = (e.clientX - rect.left) * (W / rect.width);
+  const my = (e.clientY - rect.top) * (H / rect.height);
+
+  if (state.levelUp) {
+    const cw = 200, ch = 130, gap = 22;
+    const sx = (W - (cw*3 + gap*2)) / 2;
+    const sy = H/2 - 80;
+    currentUpgrades.forEach((u, i) => {
+      const cx = sx + i*(cw+gap);
+      if (mx >= cx && mx <= cx+cw && my >= sy && my <= sy+ch) {
+        u.apply(); state.levelUp = false;
+      }
+    });
+    return;
+  }
+
+  if (state.gameOver) {
+    if (mx > W/2 - 90 && mx < W/2 + 90 && my > H/2 + 50 && my < H/2 + 96) {
+      location.reload();
+    }
+  }
+});
+
+// ── 主循环 ────────────────────────────────────────────
+function loop(ts) {
+  const dt = Math.min((ts - lastTime) / 1000, 0.05);
+  lastTime = ts;
+  update(dt);
+  draw();
+  requestAnimationFrame(loop);
+}
+requestAnimationFrame(ts => { lastTime = ts; requestAnimationFrame(loop); });
+</script>
+</body>
+</html>
